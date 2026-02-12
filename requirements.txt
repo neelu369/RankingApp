@@ -1,0 +1,33 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn==0.27.0
+python-multipart==0.0.6
+pydantic==2.5.3
+python-dotenv==1.0.0
+
+# LLM & AI
+langchain==0.1.4
+langchain-community==0.0.17
+langgraph==0.0.20
+replicate==0.21.0
+openai==1.10.0
+
+# Web Crawling
+crawl4ai==0.2.5
+beautifulsoup4==4.12.3
+playwright==1.41.0
+aiohttp==3.9.1
+
+# Database
+motor==3.3.2
+pymongo==4.6.1
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+scikit-learn==1.4.0
+
+# Utilities
+requests==2.31.0
+aiofiles==23.2.1
+httpx==0.26.0
