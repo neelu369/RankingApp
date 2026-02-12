@@ -1,16 +1,23 @@
 """
-LLM Interface using Replicate and LangChain
+LLM Interface with Token Tracking
+Monitors API usage and costs in real-time
 """
 from typing import List, Dict, Any, Optional
 import os
 import replicate
 from config.settings import settings
+from config.incubator_metrics import (
+    get_all_incubator_metrics,
+    get_top_metrics,
+    format_metric_for_llm
+)
 import json
 import re
+from token_tracking import token_tracker
 
 
 class RankingLLM:
-    """LLM interface for ranking operations"""
+    """LLM interface with integrated token tracking"""
     
     def __init__(self):
         self.model = settings.default_llm_model
@@ -20,14 +27,26 @@ class RankingLLM:
         # Set API token
         if settings.replicate_api_key:
             os.environ["REPLICATE_API_TOKEN"] = settings.replicate_api_key
+        
+        print(f"💰 Budget: ${token_tracker.budget_usd:.2f}")
+        print(f"💵 Remaining: ${token_tracker.get_remaining_budget():.4f}")
     
-    def _call_llm(self, prompt: str) -> str:
-        """Call Replicate API directly"""
+    def _call_llm(self, prompt: str, request_type: str = "general") -> str:
+        """Call Replicate API with token tracking"""
         try:
             if not os.environ.get("REPLICATE_API_TOKEN"):
                 return json.dumps({"error": "Replicate API key not set"})
             
-            print(f"🤖 Calling Replicate: {self.model}")
+            # Check budget before making request
+            if not token_tracker.can_make_request(self.max_tokens, self.model):
+                print(f"\n🚨 BUDGET LIMIT REACHED!")
+                token_tracker.print_status()
+                return json.dumps({"error": "Budget limit reached"})
+            
+            print(f"🤖 LLM Call: {request_type}")
+            
+            # Estimate input tokens (rough: 4 chars per token)
+            estimated_input_tokens = len(prompt) // 4
             
             output = replicate.run(
                 self.model,
@@ -45,7 +64,21 @@ class RankingLLM:
             else:
                 result = str(output)
             
+            # Track token usage
+            estimated_output_tokens = len(result) // 4
+            token_tracker.track_request(
+                model=self.model,
+                input_tokens=estimated_input_tokens,
+                output_tokens=estimated_output_tokens,
+                request_type=request_type
+            )
+            
+            # Show remaining budget
+            remaining = token_tracker.get_remaining_budget()
+            print(f"💵 Remaining: ${remaining:.4f}")
+            
             return result
+            
         except Exception as e:
             print(f"❌ LLM Error: {str(e)}")
             return json.dumps({"error": str(e)})
@@ -53,18 +86,14 @@ class RankingLLM:
     def _extract_json(self, text: str) -> Any:
         """Extract JSON from LLM response"""
         try:
-            # Try direct parse
             return json.loads(text)
         except:
-            # Try to find JSON in text
             json_match = re.search(r'\{.*\}|\[.*\]', text, re.DOTALL)
             if json_match:
                 try:
                     return json.loads(json_match.group())
                 except:
                     pass
-            
-            # Return None if no valid JSON found
             return None
         
     async def extract_ranking_intent(self, query: str) -> Dict[str, Any]:
@@ -87,13 +116,13 @@ Example:
 {{"entity_type": "incubator", "domain": "technology", "location": "India", "number": 10, "suggested_metrics": ["Total Funding", "Success Rate", "Portfolio Size"], "time_period": null}}
 """
         
-        response = self._call_llm(prompt)
+        response = self._call_llm(prompt, request_type="intent_extraction")
         result = self._extract_json(response)
         
         if result and isinstance(result, dict):
             return result
         
-        # Fallback: extract from query using keywords
+        # Fallback
         query_lower = query.lower()
         
         entity_type = "entity"
@@ -123,29 +152,13 @@ Example:
     async def suggest_metrics(self, entity_type: str, domain: str, context: str = "") -> List[Dict[str, Any]]:
         """Suggest appropriate metrics for ranking"""
         
-        # Predefined metrics for common entity types
-        metric_library = {
-            "incubator": [
-                {"name": "Total Funding", "type": "numerical", "higher_is_better": True, "description": "Total funding provided to startups"},
-                {"name": "Success Rate", "type": "numerical", "higher_is_better": True, "description": "Percentage of successful exits"},
-                {"name": "Portfolio Size", "type": "numerical", "higher_is_better": True, "description": "Number of startups in portfolio"},
-                {"name": "Reputation Score", "type": "numerical", "higher_is_better": True, "description": "Industry reputation rating"},
-                {"name": "Mentorship Quality", "type": "numerical", "higher_is_better": True, "description": "Quality of mentorship programs"}
-            ],
-            "startup": [
-                {"name": "Funding", "type": "numerical", "higher_is_better": True},
-                {"name": "Revenue", "type": "numerical", "higher_is_better": True},
-                {"name": "Team Size", "type": "numerical", "higher_is_better": True},
-                {"name": "Growth Rate", "type": "numerical", "higher_is_better": True}
-            ]
-        }
+        # If entity_type is incubator, use research-based metrics (no LLM call needed!)
+        if entity_type.lower() in ["incubator", "accelerator"]:
+            print(f"✓ Using research-based incubator metrics (no LLM cost)")
+            metrics = get_top_metrics(top_n=10)
+            return [format_metric_for_llm(m) for m in metrics]
         
-        # Return predefined metrics if available
-        if entity_type.lower() in metric_library:
-            print(f"✓ Using predefined metrics for {entity_type}")
-            return metric_library[entity_type.lower()]
-        
-        # Otherwise try LLM
+        # For other types, use LLM
         prompt = f"""Suggest 5 metrics for ranking {entity_type} in {domain}.
 
 Return ONLY a JSON array like:
@@ -155,26 +168,26 @@ Return ONLY a JSON array like:
 ]
 """
         
-        response = self._call_llm(prompt)
+        response = self._call_llm(prompt, request_type="metric_suggestion")
         result = self._extract_json(response)
         
         if result and isinstance(result, list):
             return result
         
-        # Fallback to generic metrics
+        # Fallback
         return [
             {"name": "Score", "type": "numerical", "higher_is_better": True},
             {"name": "Rating", "type": "numerical", "higher_is_better": True}
         ]
     
     async def suggest_sources(self, entity_type: str, domain: str, metrics: List[str]) -> List[Dict[str, Any]]:
-        """Suggest data sources - return empty for now since we'll use LLM for data"""
+        """Suggest data sources"""
         return []
     
     async def suggest_entities(self, query: str, number: int = 10) -> List[Dict[str, Any]]:
-        """Suggest actual entity names based on the query"""
+        """Suggest actual entity names - use cache when possible"""
         
-        # Hardcoded list of Indian incubators for reliability
+        # Cached Indian incubators (no LLM cost!)
         indian_incubators = [
             {"name": "T-Hub (Hyderabad)", "url": "https://t-hub.co"},
             {"name": "SINE IIT Bombay", "url": "https://www.sineiitb.org"},
@@ -190,12 +203,12 @@ Return ONLY a JSON array like:
         
         query_lower = query.lower()
         
-        # Check if query is about Indian incubators
+        # Check cache first
         if ("incubator" in query_lower or "accelerator" in query_lower) and "india" in query_lower:
-            print(f"✓ Using predefined Indian incubators list")
+            print(f"✓ Using cached Indian incubators (no LLM cost)")
             return indian_incubators[:number]
         
-        # Try LLM for other queries
+        # Use LLM for other queries
         prompt = f"""List {number} real, well-known entities for: "{query}"
 
 Return ONLY a JSON array of objects with name and optional URL:
@@ -204,14 +217,13 @@ Return ONLY a JSON array of objects with name and optional URL:
   ...
 ]
 
-Be specific and use real entity names, not generic placeholders.
+Be specific and use real entity names.
 """
         
-        response = self._call_llm(prompt)
+        response = self._call_llm(prompt, request_type="entity_discovery")
         result = self._extract_json(response)
         
         if result and isinstance(result, list) and len(result) > 0:
-            # Validate results have names
             valid_entities = []
             for e in result:
                 if isinstance(e, dict) and e.get("name"):
@@ -222,41 +234,47 @@ Be specific and use real entity names, not generic placeholders.
             if valid_entities:
                 return valid_entities[:number]
         
-        # Fallback to generic list
+        # Fallback
         return indian_incubators[:number]
     
     async def fetch_entity_metrics(self, entities: List[Dict[str, Any]], metrics: List[Dict[str, Any]], context: str = "") -> List[Dict[str, Any]]:
-        """Fetch metric values for entities using LLM knowledge"""
+        """Fetch metric values - SINGLE LLM CALL for all entities"""
         
         entity_names = [e.get("name") for e in entities]
         metric_names = [m.get("name") for m in metrics]
+        metric_descriptions = [m.get("description", "") for m in metrics]
         
-        prompt = f"""For each of these entities, provide estimated values for the given metrics based on your knowledge.
+        prompt = f"""You are analyzing Indian startup incubators. Provide CURRENT, REAL data for each metric.
 
-Entities: {json.dumps(entity_names)}
-Metrics: {json.dumps(metric_names)}
+Incubators: {json.dumps(entity_names)}
+Metrics: {json.dumps(list(zip(metric_names, metric_descriptions)))}
 
-Return a JSON array where each object has:
-- "name": entity name
-- One key for each metric with a NUMERIC value (use 0 if unknown)
+IMPORTANT:
+1. Use ONLY real, recent data from 2024-2025
+2. For "Funds Attracted" - total funding raised by ALL portfolio companies
+3. For "Survival Rate" - percentage of companies still operating vs graduated
+4. For "Graduation Rate" - percentage completing the program
+5. For ratings (1-5 scale) - use reputation and reviews
+6. Use realistic values based on incubator tier
 
-Example:
+Return JSON array:
 [
-  {{"name": "T-Hub", "Total Funding": 12000000, "Success Rate": 75, "Portfolio Size": 150}},
+  {{
+    "name": "T-Hub (Hyderabad)", 
+    "Funds Attracted": 450.5,
+    "Survival Rate": 82.3,
+    ...
+  }},
   ...
 ]
 
-Important: 
-- Use only numeric values (no currency symbols, no text like "Unknown")
-- If you don't know a value, use 0
-- Return ONLY valid JSON
+ONLY numeric values. NO text.
 """
         
-        response = self._call_llm(prompt)
+        response = self._call_llm(prompt, request_type="metric_fetching")
         result = self._extract_json(response)
         
         if result and isinstance(result, list):
-            # Clean the data - ensure numeric values
             cleaned = []
             for entity_data in result:
                 if not isinstance(entity_data, dict):
@@ -268,10 +286,8 @@ Important:
                     metric_name = metric.get("name")
                     value = entity_data.get(metric_name, 0)
                     
-                    # Convert to numeric
                     try:
                         if isinstance(value, str):
-                            # Remove currency symbols and commas
                             value = re.sub(r'[^\d.]', '', value)
                             value = float(value) if value else 0
                         cleaned_entity[metric_name] = float(value)
@@ -280,9 +296,10 @@ Important:
                 
                 cleaned.append(cleaned_entity)
             
+            print(f"✓ Fetched metrics for {len(cleaned)} entities")
             return cleaned
         
-        # Fallback: return entities with zero values
+        # Fallback
         result = []
         for entity in entities:
             entity_data = {"name": entity.get("name")}
@@ -293,15 +310,15 @@ Important:
         return result
     
     async def generate_insight(self, entity_name: str, metrics: Dict[str, Any], rank: int, context: Dict[str, Any]) -> str:
-        """Generate insights about an entity"""
+        """Generate insights"""
         prompt = f"""Provide insights about {entity_name} (ranked #{rank}).
 
 Metrics: {json.dumps(metrics)}
 
-Provide a brief 2-3 sentence analysis covering strengths and areas for improvement.
+2-3 sentences covering strengths and improvements.
 """
         
-        return self._call_llm(prompt)
+        return self._call_llm(prompt, request_type="insight_generation")
     
     async def explain_rank_change(self, entity_name: str, old_rank: int, new_rank: int, metric_changes: Dict[str, Any]) -> str:
         """Explain rank changes"""
@@ -311,10 +328,18 @@ Provide a brief 2-3 sentence analysis covering strengths and areas for improveme
 
 Metric changes: {json.dumps(metric_changes)}
 
-Explain the key factors in 2-3 sentences.
+Explain key factors in 2-3 sentences.
 """
         
-        return self._call_llm(prompt)
+        return self._call_llm(prompt, request_type="rank_explanation")
+    
+    def get_token_status(self) -> Dict[str, Any]:
+        """Get current token usage status"""
+        return token_tracker.get_summary()
+    
+    def print_token_status(self):
+        """Print token usage status"""
+        token_tracker.print_status()
 
 
 # Global instance

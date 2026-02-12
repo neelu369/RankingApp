@@ -1,5 +1,5 @@
 """
-FastAPI Backend for Ranking App
+FastAPI Backend for Ranking App - With Optimization
 """
 import sys
 from pathlib import Path
@@ -23,7 +23,8 @@ from llm_interface import ranking_llm
 from ranking_engine import ranking_engine
 from vector_db import vector_db
 from crawler import crawler
-
+from ranking_optimizer import get_optimizer  # NEW
+from token_tracking import token_tracker
 
 app = FastAPI(title="Universal Ranking App", version="1.0.0")
 
@@ -62,12 +63,18 @@ class RerankRequest(BaseModel):
     updated_metrics: Dict[str, Dict[str, Any]]
 
 
+# NEW: Optimization request model
+class OptimizationRequest(BaseModel):
+    ranking_id: str
+    ground_truth: Optional[List[str]] = None  # Optional ideal rankings for better metrics
+
+
 # Startup/Shutdown events
 @app.on_event("startup")
 async def startup_event():
     """Initialize connections on startup"""
     print("\n" + "="*60)
-    print("STARTING RANKING APP")
+    print("STARTING RANKING APP WITH OPTIMIZATION")
     print("="*60)
     
     # Check environment variables
@@ -87,6 +94,14 @@ async def startup_event():
         print(f"✗ MongoDB connection failed: {str(e)}")
         print("  The app will still run but won't persist data")
     
+    # Initialize optimizer
+    print(f"\nInitializing ranking optimizer...")
+    try:
+        optimizer = get_optimizer(ranking_engine)
+        print("✓ Ranking optimizer ready")
+    except Exception as e:
+        print(f"✗ Optimizer initialization warning: {str(e)}")
+    
     print("\n" + "="*60)
     print("APP READY - Listening on http://localhost:8000")
     print("="*60 + "\n")
@@ -104,7 +119,11 @@ async def shutdown_event():
 @app.get("/")
 async def root():
     """Health check"""
-    return {"status": "healthy", "app": "Universal Ranking App"}
+    return {
+        "status": "healthy", 
+        "app": "Universal Ranking App",
+        "features": ["ranking", "optimization", "insights"]
+    }
 
 
 @app.post("/api/rank/crawler")
@@ -124,7 +143,7 @@ async def rank_by_crawler(request: RankingQuery):
 
         ranking_id = result.get("query_id") or str(uuid.uuid4())
 
-        # ✅ STORE FOR INSIGHTS
+        # Store for insights (now includes optimization report)
         await vector_db.store_ranking({
             "ranking_id": ranking_id,
             "query_id": ranking_id,
@@ -132,6 +151,7 @@ async def rank_by_crawler(request: RankingQuery):
             "query": request.query,
             "metrics": result["metrics"],
             "ranking": result["ranking"],
+            "optimization": result.get("optimization", {}),  # NEW
             "created_at": datetime.utcnow().isoformat()
         })
 
@@ -141,12 +161,12 @@ async def rank_by_crawler(request: RankingQuery):
             "query": request.query,
             "ranking": result["ranking"],
             "intent": result["intent"],
-            "metrics_used": result["metrics"]
+            "metrics_used": result["metrics"],
+            "optimization": result.get("optimization", {})  # NEW
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 @app.post("/api/rank/dataset")
@@ -157,27 +177,17 @@ async def rank_dataset(
     try:
         print("=== /api/rank/dataset called ===")
 
-        # 1️⃣ Check file
-        print("File received:", file.filename, file.content_type)
-
-        # 2️⃣ Check raw request data
-        print("Raw request_data:", request_data)
-
-        # Parse request data
+        # Parse request
         import json
         req = json.loads(request_data)
-        print("Parsed JSON:", req)
-
         top_k = req.get("top_k", 10)
         request = DatasetRankingRequest(**req)
-        print("Request model created")
 
-        # 3️⃣ Read CSV
+        # Read CSV
         contents = await file.read()
-        print("File size:", len(contents))
-
         df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
 
+        # Find entity column
         entity_column = None
         possible_names = ["name", "entity", "customer", "company", "material", "employee"]
 
@@ -186,32 +196,21 @@ async def rank_dataset(
                 entity_column = col
                 break
 
-        # Fallback: first column
         if entity_column is None:
             entity_column = df.columns[0]
 
-        # Rename to standard "entity"
         df = df.rename(columns={entity_column: "entity"})
 
-
-        print("CSV loaded. Shape:", df.shape)
-        print("Columns:", df.columns.tolist())
-
-        # Convert to list of dicts
+        # Convert to entities
         entities = df.to_dict("records")
-        print("Entities count:", len(entities))
 
-        # 4️⃣ Metrics
+        # Determine metrics
         if request.metrics:
             metrics = request.metrics
-            print("Using provided metrics")
         else:
-            print("Auto-detecting metrics")
-
             metrics = []
             for col in df.columns:
                 if col.lower() not in ["name", "id", "entity"]:
-
                     if pd.api.types.is_numeric_dtype(df[col]):
                         metric_type = "numerical"
                     else:
@@ -223,48 +222,153 @@ async def rank_dataset(
                         "higher_is_better": True
                     })
 
-        print("Metrics:", metrics)
-
-        # 5️⃣ Ranking
-        print("Calling ranking_engine...")
+        # Ranking
+        weights = request.weights if request.weights else {m["name"]: 1.0/len(metrics) for m in metrics}
+        
         ranking = ranking_engine.rank_entities(
             entities=entities,
             metrics=metrics,
-            weights=request.weights
+            weights=weights
         )
         ranking = ranking[:top_k]
 
+        # NEW: Run optimization analysis
+        optimizer = get_optimizer(ranking_engine)
+        optimization_result = optimizer.analyze_and_optimize(
+            rankings=ranking,
+            metrics=metrics,
+            current_weights=weights,
+            ground_truth=None
+        )
 
-        print("Ranking complete")
+        # Use optimized rankings if available
+        if optimization_result.get("optimized_rankings"):
+            final_ranking = optimization_result["optimized_rankings"][:top_k]
+        else:
+            final_ranking = ranking
 
-        # 6️⃣ Store DB
+        # Store in DB
         ranking_id = str(uuid.uuid4())
-
-        print("Storing in vector DB...")
         await vector_db.store_ranking({
             "ranking_id": ranking_id,
             "query_id": ranking_id,
             "type": "dataset",
             "metrics": metrics,
-            "ranking": ranking
+            "ranking": final_ranking,
+            "optimization": {
+                "applied": optimization_result.get("should_optimize", False),
+                "report": optimization_result.get("analysis", {})
+            }
         })
-
-        print("Stored successfully:", ranking_id)
 
         return {
             "success": True,
             "ranking_id": ranking_id,
-            "ranking": ranking,
-            "metrics_used": metrics
+            "ranking": final_ranking,
+            "metrics_used": metrics,
+            "optimization": {  # NEW
+                "applied": optimization_result.get("should_optimize", False),
+                "report": optimization_result.get("analysis", {}),
+                "weight_changes": optimization_result.get("weight_changes", {})
+            }
         }
 
     except Exception as e:
         print("❌ ERROR in /api/rank/dataset:", repr(e))
         import traceback
         traceback.print_exc()
-
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# NEW: Optimization endpoint
+@app.post("/api/optimize")
+async def optimize_ranking(request: OptimizationRequest):
+    """
+    Analyze and optimize an existing ranking
+    """
+    try:
+        # Retrieve ranking from database
+        ranking_data = await vector_db.get_ranking(request.ranking_id)
+        
+        if not ranking_data:
+            raise HTTPException(status_code=404, detail="Ranking not found")
+        
+        rankings = ranking_data.get("ranking", [])
+        metrics = ranking_data.get("metrics", [])
+        
+        if not rankings or not metrics:
+            raise HTTPException(status_code=400, detail="Invalid ranking data")
+        
+        # Extract current weights (if stored) or create defaults
+        weights = {m["name"]: 1.0 / len(metrics) for m in metrics}
+        
+        # Run optimization
+        optimizer = get_optimizer(ranking_engine)
+        result = optimizer.analyze_and_optimize(
+            rankings=rankings,
+            metrics=metrics,
+            current_weights=weights,
+            ground_truth=request.ground_truth
+        )
+        
+        # Store optimized ranking if created
+        if result.get("optimized_rankings"):
+            new_ranking_id = str(uuid.uuid4())
+            await vector_db.store_ranking({
+                "ranking_id": new_ranking_id,
+                "query_id": request.ranking_id,
+                "type": "optimized",
+                "metrics": metrics,
+                "ranking": result["optimized_rankings"],
+                "previous_ranking_id": request.ranking_id,
+                "optimization": {
+                    "applied": True,
+                    "report": result["analysis"]
+                }
+            })
+            
+            return {
+                "success": True,
+                "optimized_ranking_id": new_ranking_id,
+                "original_ranking_id": request.ranking_id,
+                "optimization_report": result["analysis"],
+                "optimized_rankings": result["optimized_rankings"],
+                "weight_changes": result.get("weight_changes", {}),
+                "current_metrics": result.get("current_metrics", {})
+            }
+        else:
+            return {
+                "success": True,
+                "message": "Rankings are already optimal",
+                "optimization_report": result["analysis"],
+                "current_metrics": result.get("current_metrics", {})
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# NEW: Get optimization history
+@app.get("/api/optimization/history")
+async def get_optimization_history(limit: int = 10):
+    """
+    Get history of optimizations performed
+    """
+    try:
+        optimizer = get_optimizer(ranking_engine)
+        history = optimizer.metrics_history[-limit:]
+        
+        return {
+            "success": True,
+            "history": history,
+            "total_optimizations": len(optimizer.metrics_history)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/insights")
@@ -301,7 +405,8 @@ async def get_insights(request: InsightRequest):
         # Generate insights using LLM
         context = {
             "total_entities": len(ranking),
-            "top_entity": ranking[0].get("name") if ranking else None
+            "top_entity": ranking[0].get("name") if ranking else None,
+            "optimization_applied": ranking_data.get("optimization", {}).get("applied", False)
         }
         
         insights = await ranking_llm.generate_insight(
@@ -316,7 +421,8 @@ async def get_insights(request: InsightRequest):
             "entity": request.entity_name,
             "rank": entity.get("rank"),
             "metrics": metrics,
-            "insights": insights
+            "insights": insights,
+            "optimization_info": ranking_data.get("optimization", {})  # NEW
         }
     except HTTPException:
         raise
@@ -346,6 +452,15 @@ async def rerank_entities(request: RerankRequest):
             metric_definitions=metrics
         )
         
+        # NEW: Analyze new ranking quality
+        optimizer = get_optimizer(ranking_engine)
+        weights = {m["name"]: 1.0 / len(metrics) for m in metrics}
+        optimization_result = optimizer.analyze_and_optimize(
+            rankings=new_ranking,
+            metrics=metrics,
+            current_weights=weights
+        )
+        
         # Store new ranking
         new_ranking_id = str(uuid.uuid4())
         await vector_db.store_ranking({
@@ -354,14 +469,18 @@ async def rerank_entities(request: RerankRequest):
             "type": "rerank",
             "metrics": metrics,
             "ranking": new_ranking,
-            "previous_ranking_id": request.ranking_id
+            "previous_ranking_id": request.ranking_id,
+            "optimization": {
+                "report": optimization_result.get("analysis", {})
+            }
         })
         
         return {
             "success": True,
             "new_ranking_id": new_ranking_id,
             "ranking": new_ranking,
-            "changes": changes
+            "changes": changes,
+            "optimization_report": optimization_result.get("analysis", {})  # NEW
         }
     except HTTPException:
         raise
@@ -399,7 +518,6 @@ async def suggest_metrics(entity_type: str, domain: str):
 async def preview_query(body: Dict[str, Any]):
     """
     Preview a query: return suggested intent, suggested metrics and suggested entities
-    Body: {"query": str, "num_results": int}
     """
     try:
         query = body.get("query")
@@ -415,7 +533,7 @@ async def preview_query(body: Dict[str, Any]):
         # Suggest metrics
         metrics = await ranking_llm.suggest_metrics(entity_type=entity_type, domain=domain, context=query)
 
-        # Suggest entities (names/urls)
+        # Suggest entities
         entities = await ranking_llm.suggest_entities(query=query, number=num_results)
 
         return {
@@ -466,6 +584,85 @@ async def compare_entities(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/token-usage")
+async def get_token_usage():
+    """Get current token usage and budget status"""
+    try:
+        summary = token_tracker.get_summary()
+        
+        return {
+            "success": True,
+            "budget": {
+                "total_usd": summary["budget_usd"],
+                "spent_usd": summary["spent_usd"],
+                "remaining_usd": summary["remaining_usd"],
+                "percent_used": summary["percent_used"]
+            },
+            "tokens": {
+                "input": summary["total_input_tokens"],
+                "output": summary["total_output_tokens"],
+                "total": summary["total_tokens"]
+            },
+            "requests": {
+                "total": summary["total_requests"]
+            },
+            "models": summary["models_used"],
+            "timeline": {
+                "started_at": summary["started_at"],
+                "last_updated": summary["last_updated"]
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/token-usage/reset")
+async def reset_token_usage():
+    """Reset token usage tracking (admin only)"""
+    try:
+        token_tracker.reset()
+        return {
+            "success": True,
+            "message": "Token usage tracking has been reset"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/token-usage/can-proceed")
+async def can_proceed_with_request(estimated_tokens: int = 2000):
+    """Check if there's budget for another request"""
+    try:
+        can_proceed = token_tracker.can_make_request(estimated_tokens)
+        remaining = token_tracker.get_remaining_budget()
+        
+        return {
+            "success": True,
+            "can_proceed": can_proceed,
+            "remaining_budget_usd": remaining,
+            "estimated_cost_usd": (estimated_tokens // 2 * 0.00065 / 1000) + (estimated_tokens // 2 * 0.00275 / 1000)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Add this to your startup event in main.py:
+@app.on_event("startup")
+async def startup_event():
+    """Initialize connections on startup"""
+    print("\n" + "="*60)
+    print("STARTING RANKING APP WITH TOKEN TRACKING")
+    print("="*60)
+    
+    # ... existing startup code ...
+    
+    # Print initial token status
+    print("\n💰 Token Budget Status:")
+    token_tracker.print_status()
+    
+    print("\n" + "="*60)
+    print("APP READY")
+    print("="*60 + "\n")
 
 if __name__ == "__main__":
     import uvicorn

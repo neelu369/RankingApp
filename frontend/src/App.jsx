@@ -4,6 +4,8 @@ import CrawlerRanking from './components/CrawlerRanking';
 import DatasetRanking from './components/DatasetRanking';
 import RankingDisplay from './components/RankingDisplay';
 import InsightsPanel from './components/InsightsPanel';
+import TokenUsage from './components/TokenUsage';
+
 
 function App() {
   const [mode, setMode] = useState('crawler'); // 'crawler' or 'dataset'
@@ -59,6 +61,7 @@ function App() {
 
       <footer className="App-footer">
         <p>Powered by Replicate, LangChain, LangGraph, Crawl4AI & MongoDB</p>
+        <TokenUsage />
       </footer>
     </div>
   );

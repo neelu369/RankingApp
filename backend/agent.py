@@ -1,17 +1,16 @@
 """
 LangGraph Agent for orchestrating ranking workflow
-Manages the multi-step process of understanding queries, gathering data, and ranking
+Manages the multi-step process of understanding queries, gathering data, ranking, and optimizing
 """
 from typing import TypedDict, Annotated, Sequence, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 import operator
-import random
 from llm_interface import ranking_llm
 from crawler import crawler
 from ranking_engine import ranking_engine
 from vector_db import vector_db
-import asyncio
+from ranking_optimizer import get_optimizer
 
 
 class RankingState(TypedDict):
@@ -24,15 +23,22 @@ class RankingState(TypedDict):
     sources: List[Dict[str, Any]]
     entities: List[Dict[str, Any]]
     ranking_result: List[Dict[str, Any]]
+    # NEW: Optimization fields
+    optimization_report: Dict[str, Any]
+    optimized_rankings: List[Dict[str, Any]]
+    used_optimization: bool
+    feature_weights: Dict[str, float]
     error: str
 
 
 class RankingAgent:
-    """LangGraph-based agent for handling ranking requests"""
+    """LangGraph-based agent for handling ranking requests with optimization"""
     
     def __init__(self):
         self.workflow = self._build_workflow()
         self.app = self.workflow.compile()
+        # Initialize optimizer
+        self.optimizer = get_optimizer(ranking_engine)
     
     def _build_workflow(self) -> StateGraph:
         """Build the LangGraph workflow"""
@@ -45,16 +51,18 @@ class RankingAgent:
         workflow.add_node("gather_data", self.gather_data)
         workflow.add_node("normalize_data", self.normalize_data)
         workflow.add_node("compute_ranking", self.compute_ranking)
+        workflow.add_node("optimize_ranking", self.optimize_ranking)  # NEW
         workflow.add_node("generate_insights", self.generate_insights)
         
-        # Define edges
+        # Define edges - optimization added as post-processing step (Option 1)
         workflow.set_entry_point("understand_query")
         workflow.add_edge("understand_query", "determine_metrics")
         workflow.add_edge("determine_metrics", "identify_sources")
         workflow.add_edge("identify_sources", "gather_data")
         workflow.add_edge("gather_data", "normalize_data")
         workflow.add_edge("normalize_data", "compute_ranking")
-        workflow.add_edge("compute_ranking", "generate_insights")
+        workflow.add_edge("compute_ranking", "optimize_ranking")  # NEW: Post-processing
+        workflow.add_edge("optimize_ranking", "generate_insights")  # UPDATED
         workflow.add_edge("generate_insights", END)
         
         return workflow
@@ -392,29 +400,124 @@ class RankingAgent:
         entities = state.get("entities", [])
         metrics = state.get("metrics", [])
         
+        # Create default weights
+        weights = {m["name"]: 1.0 / len(metrics) for m in metrics}
+        state["feature_weights"] = weights
+        
         # Compute ranking
         ranking = ranking_engine.rank_entities(
             entities=entities,
             metrics=metrics,
+            weights=weights,
             normalization="minmax"
         )
         
         state["ranking_result"] = ranking
         
-        # Store in vector DB
-        await vector_db.store_ranking({
-            "query": state["query"],
-            "query_id": state.get("query_id", ""),
-            "intent": state["intent"],
-            "metrics": metrics,
-            "ranking": ranking
-        })
+        return state
+    
+    async def optimize_ranking(self, state: RankingState) -> RankingState:
+        """
+        NEW: Optimize ranking quality (Option 1 - Post-processing)
+        This runs AFTER compute_ranking as a final optimization step
+        """
+        print("\n" + "="*60)
+        print("RANKING OPTIMIZATION (Post-Processing)")
+        print("="*60)
+        
+        rankings = state.get("ranking_result", [])
+        metrics = state.get("metrics", [])
+        feature_weights = state.get("feature_weights", {})
+        
+        # Skip if no rankings
+        if not rankings:
+            print("⚠️  No rankings to optimize, skipping optimization")
+            state["optimization_report"] = {}
+            state["optimized_rankings"] = []
+            state["used_optimization"] = False
+            return state
+        
+        try:
+            # Run optimization analysis
+            print("📊 Analyzing ranking quality...")
+            result = self.optimizer.analyze_and_optimize(
+                rankings=rankings,
+                metrics=metrics,
+                current_weights=feature_weights,
+                ground_truth=None  # Could be provided if available
+            )
+            
+            # Store optimization report
+            state["optimization_report"] = result["analysis"]
+            
+            # Log results
+            print(f"\n📈 Overall Health: {result['analysis']['overall_health'].upper()}")
+            print(f"🎯 Confidence: {result['analysis']['confidence_score']:.2f}")
+            
+            # Show metric analysis
+            for metric_analysis in result["analysis"]["metric_analyses"]:
+                status_icon = {
+                    "excellent": "✓",
+                    "good": "👍",
+                    "needs_improvement": "⚠️",
+                    "critical": "🚨"
+                }
+                icon = status_icon.get(metric_analysis["status"], "•")
+                print(f"  {icon} {metric_analysis['metric']}: {metric_analysis['value']:.3f} ({metric_analysis['status']})")
+            
+            # Decide if we should apply optimization
+            if result["should_optimize"] and result.get("optimized_rankings"):
+                print(f"\n🔧 Optimization recommended - applying improvements...")
+                state["optimized_rankings"] = result["optimized_rankings"]
+                state["used_optimization"] = True
+                
+                # Update feature weights
+                if result.get("optimized_weights"):
+                    state["feature_weights"] = result["optimized_weights"]
+                
+                # Log weight changes
+                if result.get("weight_changes"):
+                    print("\n📊 Weight Adjustments:")
+                    for feature, changes in result["weight_changes"].items():
+                        change_icon = "📈" if changes["change"] > 0 else "📉"
+                        print(f"  {change_icon} {feature}: {changes['old']:.3f} → {changes['new']:.3f} ({changes['change']:+.3f})")
+                
+                print(f"\n✅ Optimization applied - Rankings improved")
+            else:
+                print(f"\n✅ Rankings are already good - No optimization needed")
+                state["optimized_rankings"] = []
+                state["used_optimization"] = False
+            
+        except Exception as e:
+            print(f"\n❌ Error during optimization: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Continue with original rankings on error
+            state["optimization_report"] = {"error": str(e)}
+            state["optimized_rankings"] = []
+            state["used_optimization"] = False
+        
+        print("="*60 + "\n")
         
         return state
     
     async def generate_insights(self, state: RankingState) -> RankingState:
         """Generate insights for the ranking"""
-        ranking = state.get("ranking_result", [])
+        # Use optimized rankings if available, otherwise use original
+        ranking = state.get("optimized_rankings") or state.get("ranking_result", [])
+        
+        # Store in vector DB with optimization info
+        await vector_db.store_ranking({
+            "query": state["query"],
+            "query_id": state.get("query_id", ""),
+            "intent": state["intent"],
+            "metrics": state["metrics"],
+            "ranking": ranking,
+            "optimization_report": state.get("optimization_report", {}),
+            "used_optimization": state.get("used_optimization", False),
+            "feature_weights": state.get("feature_weights", {})
+        })
         
         # Store knowledge base entry
         await vector_db.store_knowledge_base({
@@ -422,11 +525,14 @@ class RankingAgent:
             "entity_type": state["intent"].get("entity_type"),
             "domain": state["intent"].get("domain"),
             "metrics": [m["name"] for m in state["metrics"]],
-            "ranking_summary": f"Top entity: {ranking[0].get('name') if ranking else 'None'}"
+            "ranking_summary": f"Top entity: {ranking[0].get('name') if ranking else 'None'}",
+            "optimization_applied": state.get("used_optimization", False)
         })
         
+        # Create final message
+        optimization_note = " (optimized)" if state.get("used_optimization") else ""
         state["messages"].append(
-            AIMessage(content=f"Ranking complete! Top entity: {ranking[0].get('name') if ranking else 'None'}")
+            AIMessage(content=f"Ranking complete{optimization_note}! Top entity: {ranking[0].get('name') if ranking else 'None'}")
         )
         
         return state
@@ -446,13 +552,13 @@ class RankingAgent:
             sources: Optional user-specified sources
             
         Returns:
-            Ranking results
+            Ranking results with optimization info
         """
         import uuid
         
         query_id = str(uuid.uuid4())
         print(f"\n{'='*60}")
-        print(f"Starting ranking workflow")
+        print(f"Starting ranking workflow with optimization")
         print(f"Query ID: {query_id}")
         print(f"Query: {query}")
         print(f"Type: {query_type}")
@@ -468,6 +574,10 @@ class RankingAgent:
             "sources": sources or [],
             "entities": entities or [],
             "ranking_result": [],
+            "optimization_report": {},
+            "optimized_rankings": [],
+            "used_optimization": False,
+            "feature_weights": {},
             "error": ""
         }
         
@@ -476,15 +586,26 @@ class RankingAgent:
             print("Executing LangGraph workflow...")
             final_state = await self.app.ainvoke(initial_state)
             
-            print(f"\nWorkflow completed successfully")
-            print(f"Entities ranked: {len(final_state.get('ranking_result', []))}")
+            # Use optimized rankings if available, otherwise original
+            final_rankings = final_state.get("optimized_rankings") or final_state.get("ranking_result", [])
+            
+            print(f"\n{'='*60}")
+            print(f"Workflow completed successfully")
+            print(f"Entities ranked: {len(final_rankings)}")
+            print(f"Optimization applied: {final_state.get('used_optimization', False)}")
+            print(f"{'='*60}\n")
             
             return {
-                "ranking": final_state.get("ranking_result", []),
+                "ranking": final_rankings,
                 "intent": final_state.get("intent", {}),
                 "metrics": final_state.get("metrics", []),
                 "messages": [m.content for m in final_state.get("messages", [])],
-                "query_id": query_id
+                "query_id": query_id,
+                "optimization": {
+                    "applied": final_state.get("used_optimization", False),
+                    "report": final_state.get("optimization_report", {}),
+                    "weights": final_state.get("feature_weights", {})
+                }
             }
         except Exception as e:
             print(f"\n{'!'*60}")
@@ -500,7 +621,12 @@ class RankingAgent:
                 "metrics": initial_state.get("metrics", []),
                 "messages": [f"Error: {str(e)}"],
                 "query_id": query_id,
-                "error": str(e)
+                "error": str(e),
+                "optimization": {
+                    "applied": False,
+                    "report": {},
+                    "weights": {}
+                }
             }
 
 

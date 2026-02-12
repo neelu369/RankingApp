@@ -11,11 +11,15 @@ const CrawlerRanking = ({ onRankingComplete }) => {
   const [useSystemSources, setUseSystemSources] = useState(true);
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState(1); // 1: query, 2: metrics, 3: sources
+  const [isIncubatorQuery, setIsIncubatorQuery] = useState(false);
 
   const handleSubmitQuery = async () => {
     if (!query.trim()) return;
-    // Request a preview from backend: suggested metrics and entities
+    
+    setLoading(true);
+    
     try {
+      // Request a preview from backend
       const resp = await axios.post('http://localhost:8000/api/preview', {
         query,
         num_results: numResults
@@ -23,15 +27,28 @@ const CrawlerRanking = ({ onRankingComplete }) => {
 
       if (resp.data && resp.data.success) {
         const suggested = resp.data.metrics || [];
-        // add enabled flag so user can toggle metrics on/off
+        const intent = resp.data.intent || {};
+        
+        // Check if this is an incubator query
+        const isIncubator = intent.entity_type === 'incubator' || intent.entity_type === 'accelerator';
+        setIsIncubatorQuery(isIncubator);
+        
+        // Add enabled flag so user can toggle metrics on/off
         setMetrics(suggested.map((m) => ({ ...m, enabled: true })));
         setPreviewEntities(resp.data.entities || []);
+        
+        // Show info message for incubator queries
+        if (isIncubator) {
+          console.log('✓ Using research-based incubator metrics');
+        }
       }
       setStep(2);
     } catch (err) {
       console.error('Preview error', err);
       // Fallback: still move to metrics step
       setStep(2);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -42,12 +59,15 @@ const CrawlerRanking = ({ onRankingComplete }) => {
   const handleSubmitRanking = async () => {
     setLoading(true);
     try {
-      // Prepare metrics to send: only include enabled ones and minimal fields
+      // Prepare metrics to send: only include enabled ones
       const chosenMetrics = metrics && metrics.length > 0
         ? metrics.filter((m) => m.enabled !== false).map((m) => ({
             name: m.name,
             type: m.type || 'numerical',
-            higher_is_better: m.higher_is_better !== false
+            higher_is_better: m.higher_is_better !== false,
+            description: m.description || '',
+            unit: m.unit || '',
+            benchmark: m.benchmark || 0
           }))
         : null;
 
@@ -124,8 +144,8 @@ const CrawlerRanking = ({ onRankingComplete }) => {
               max="100"
             />
           </div>
-          <button onClick={handleSubmitQuery} className="btn-primary">
-            Next: Choose Metrics →
+          <button onClick={handleSubmitQuery} className="btn-primary" disabled={loading}>
+            {loading ? 'Analyzing...' : 'Next: Choose Metrics →'}
           </button>
         </div>
       )}
@@ -133,6 +153,13 @@ const CrawlerRanking = ({ onRankingComplete }) => {
       {step === 2 && (
         <div className="step-container">
           <h3>Step 2: Choose Metrics</h3>
+          
+          {isIncubatorQuery && (
+            <div className="info-banner">
+              📚 <strong>Research-Based Metrics:</strong> Using validated metrics from academic literature for incubator rankings
+            </div>
+          )}
+          
           <div className="form-group">
             <label>
               <input
@@ -140,7 +167,9 @@ const CrawlerRanking = ({ onRankingComplete }) => {
                 checked={useSystemMetrics}
                 onChange={() => setUseSystemMetrics(true)}
               />
-              Let the system suggest metrics (shown below)
+              {isIncubatorQuery 
+                ? 'Use research-based incubator metrics (recommended)' 
+                : 'Let the system suggest metrics'}
             </label>
             <label>
               <input
@@ -154,16 +183,26 @@ const CrawlerRanking = ({ onRankingComplete }) => {
 
           {useSystemMetrics && metrics && metrics.length > 0 && (
             <div className="suggested-metrics">
-              <h4>Suggested metrics</h4>
+              <h4>
+                {isIncubatorQuery ? 'Research-Based Metrics' : 'Suggested Metrics'}
+                {isIncubatorQuery && <span className="badge">Validated</span>}
+              </h4>
               {metrics.map((metric, index) => (
                 <div key={index} className="metric-row">
-                  <label>
+                  <label className="metric-checkbox">
                     <input
                       type="checkbox"
                       checked={metric.enabled !== false}
                       onChange={(e) => updateMetric(index, 'enabled', e.target.checked)}
                     />
-                    <strong>{metric.name}</strong> — {metric.description || ''}
+                    <div className="metric-details">
+                      <strong>{metric.name}</strong>
+                      {metric.description && <p className="metric-desc">{metric.description}</p>}
+                      {metric.unit && <span className="metric-unit">Unit: {metric.unit}</span>}
+                      {metric.benchmark && (
+                        <span className="metric-benchmark">Benchmark: {metric.benchmark}</span>
+                      )}
+                    </div>
                   </label>
                 </div>
               ))}
@@ -230,7 +269,7 @@ const CrawlerRanking = ({ onRankingComplete }) => {
                 checked={useSystemSources}
                 onChange={() => setUseSystemSources(true)}
               />
-              Let the system find sources
+              Let the system find sources (uses live web data)
             </label>
             <label>
               <input

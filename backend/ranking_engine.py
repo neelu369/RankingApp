@@ -1,6 +1,6 @@
 """
-Dynamic Ranking Algorithm Engine
-Supports multiple ranking methodologies and normalization strategies
+Dynamic Ranking Algorithm Engine - FIXED VERSION
+Fixes incorrect ranking calculations
 """
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
@@ -12,7 +12,7 @@ import json
 
 class RankingEngine:
     """
-    Universal ranking engine that can rank any entity by any metrics
+    Universal ranking engine - FIXED to prevent ranking errors
     """
     
     def __init__(self):
@@ -21,6 +21,7 @@ class RankingEngine:
             "standard": StandardScaler(),
             "robust": RobustScaler()
         }
+        self.debug = True  # Enable debug logging
     
     def rank_entities(
         self,
@@ -31,7 +32,7 @@ class RankingEngine:
         constraints: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Rank entities based on metrics and weights
+        Rank entities based on metrics and weights - FIXED VERSION
         
         Args:
             entities: List of entities with metric values
@@ -46,6 +47,10 @@ class RankingEngine:
         if not entities:
             return []
         
+        print("\n" + "="*60)
+        print("🔧 RANKING ENGINE - DEBUG MODE")
+        print("="*60)
+        
         # Convert to DataFrame
         df = pd.DataFrame(entities)
         
@@ -55,7 +60,13 @@ class RankingEngine:
         
         # Normalize weights to sum to 1
         total_weight = sum(weights.values())
-        weights = {k: v / total_weight for k, v in weights.items()}
+        if total_weight > 0:
+            weights = {k: v / total_weight for k, v in weights.items()}
+        
+        print(f"\n📊 Input Summary:")
+        print(f"  Entities: {len(df)}")
+        print(f"  Metrics: {len(metrics)}")
+        print(f"  Weights: {weights}")
         
         # Process each metric
         scores = np.zeros(len(df))
@@ -65,23 +76,32 @@ class RankingEngine:
             metric_name = metric["name"]
             
             if metric_name not in df.columns:
+                print(f"⚠️  Metric '{metric_name}' not found in data, skipping")
                 continue
             
-            # Handle missing values (safe for mixed types)
+            # Handle missing values
             if pd.api.types.is_numeric_dtype(df[metric_name]):
                 df[metric_name] = df[metric_name].fillna(df[metric_name].median())
             else:
                 df[metric_name] = df[metric_name].fillna("UNKNOWN")
             
-            # Get metric type
             metric_type = metric.get("type", "numerical")
             higher_is_better = metric.get("higher_is_better", True)
+            metric_weight = weights.get(metric_name, 0)
+            
+            print(f"\n📈 Processing: {metric_name}")
+            print(f"   Type: {metric_type}")
+            print(f"   Higher is better: {higher_is_better}")
+            print(f"   Weight: {metric_weight:.4f}")
             
             if metric_type == "numerical":
                 # Numerical metric processing
                 df[metric_name] = pd.to_numeric(df[metric_name], errors="coerce")
-
+                df[metric_name] = df[metric_name].fillna(0)
+                
                 values = df[metric_name].values.reshape(-1, 1)
+                
+                print(f"   Range: [{values.min():.2f}, {values.max():.2f}]")
                 
                 # Apply constraints if specified
                 if constraints and metric_name in constraints:
@@ -95,42 +115,50 @@ class RankingEngine:
                 if constraints and constraints.get("detect_outliers", False):
                     values = self._handle_outliers(values)
                 
-                # Normalize
-                if normalization in self.normalization_methods:
-                    scaler = self.normalization_methods[normalization]
-                    normalized = scaler.fit_transform(values).flatten()
+                # Normalize - FIXED: Use proper scaling
+                min_val, max_val = values.min(), values.max()
+                
+                if max_val > min_val:
+                    # Proper min-max normalization
+                    normalized = (values - min_val) / (max_val - min_val)
+                    normalized = normalized.flatten()
                 else:
-                    # Default min-max normalization
-                    min_val, max_val = values.min(), values.max()
-                    if max_val > min_val:
-                        normalized = (values - min_val) / (max_val - min_val)
-                        normalized = normalized.flatten()
-                    else:
-                        normalized = np.ones(len(values))
+                    # All values are the same
+                    normalized = np.ones(len(values)) * 0.5
                 
                 # Invert if lower is better
                 if not higher_is_better:
                     normalized = 1 - normalized
                 
+                print(f"   Normalized range: [{normalized.min():.4f}, {normalized.max():.4f}]")
+                
                 # Apply weight and add to total score
-                weighted_score = normalized * weights.get(metric_name, 0)
+                weighted_score = normalized * metric_weight
                 scores += weighted_score
                 metric_scores[metric_name] = normalized.tolist()
                 
+                print(f"   Contribution to total: [{weighted_score.min():.4f}, {weighted_score.max():.4f}]")
+                
             elif metric_type == "categorical":
                 # Categorical metric processing
-                # Convert categories to scores
                 category_scores = self._score_categorical(df[metric_name], higher_is_better)
-                weighted_score = category_scores * weights.get(metric_name, 0)
+                weighted_score = category_scores * metric_weight
                 scores += weighted_score
                 metric_scores[metric_name] = category_scores.tolist()
         
-        # Create results
+        # Create results - FIXED: Proper ranking
         df["final_score"] = scores
+        
+        # Handle infinite and NaN values
         df["final_score"] = df["final_score"].replace([np.inf, -np.inf], np.nan)
-
-        # Fill NaN with lowest possible value
-        df["final_score"] = df["final_score"].fillna(df["final_score"].min() - 1)
+        df["final_score"] = df["final_score"].fillna(0)
+        
+        print(f"\n🏆 Final Scores:")
+        print(f"   Range: [{df['final_score'].min():.4f}, {df['final_score'].max():.4f}]")
+        print(f"   Mean: {df['final_score'].mean():.4f}")
+        print(f"   Std: {df['final_score'].std():.4f}")
+        
+        # FIXED: Proper ranking (1 = best, higher score = better rank)
         df["rank"] = df["final_score"].rank(ascending=False, method="min").astype(int)
         
         # Add individual metric scores
@@ -140,22 +168,20 @@ class RankingEngine:
         # Sort by rank
         df = df.sort_values("rank")
         
+        # Debug: Print top 5
+        print(f"\n🥇 Top 5 Rankings:")
+        for idx, row in df.head(5).iterrows():
+            print(f"   #{row['rank']}: {row.get('name', 'Unknown')} - Score: {row['final_score']:.4f}")
+        
+        print("="*60 + "\n")
+        
         # Convert to list of dicts
         results = df.to_dict("records")
         
         return results
     
     def _handle_outliers(self, values: np.ndarray, method: str = "clip") -> np.ndarray:
-        """
-        Handle outliers in data
-        
-        Args:
-            values: Array of values
-            method: Method to handle outliers (clip, remove, winsorize)
-            
-        Returns:
-            Processed values
-        """
+        """Handle outliers in data"""
         q1 = np.percentile(values, 25)
         q3 = np.percentile(values, 75)
         iqr = q3 - q1
@@ -168,24 +194,14 @@ class RankingEngine:
             return values
     
     def _score_categorical(self, categories: pd.Series, higher_is_better: bool = True) -> np.ndarray:
-        """
-        Score categorical values
-        
-        Args:
-            categories: Series of categorical values
-            higher_is_better: Whether higher categories are better
-            
-        Returns:
-            Numerical scores
-        """
-        # Create mapping of categories to scores
+        """Score categorical values"""
         unique_categories = categories.unique()
         n_categories = len(unique_categories)
         
         if n_categories == 0:
             return np.zeros(len(categories))
         
-        # Assign scores based on frequency or alphabetical order
+        # Create mapping of categories to scores
         category_scores = {cat: i / (n_categories - 1) if n_categories > 1 else 0.5 
                           for i, cat in enumerate(sorted(unique_categories))}
         
@@ -196,17 +212,7 @@ class RankingEngine:
     
     def compare_entities(self, entity1: Dict[str, Any], entity2: Dict[str, Any], 
                         metrics: List[str]) -> Dict[str, Any]:
-        """
-        Compare two entities across metrics
-        
-        Args:
-            entity1: First entity
-            entity2: Second entity
-            metrics: List of metrics to compare
-            
-        Returns:
-            Comparison results
-        """
+        """Compare two entities across metrics"""
         comparison = {
             "entity1": entity1.get("name", "Entity 1"),
             "entity2": entity2.get("name", "Entity 2"),
@@ -232,7 +238,6 @@ class RankingEngine:
                         "winner": comparison["entity1"] if val1_num > val2_num else comparison["entity2"]
                     }
                 except (ValueError, TypeError):
-                    # Categorical comparison
                     comparison["metrics"][metric] = {
                         "entity1_value": val1,
                         "entity2_value": val2,
@@ -245,18 +250,7 @@ class RankingEngine:
                updated_metrics: Dict[str, Dict[str, Any]],
                metric_definitions: List[Dict[str, Any]],
                weights: Optional[Dict[str, float]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """
-        Rerank entities with updated metrics
-        
-        Args:
-            current_ranking: Current ranking
-            updated_metrics: Updated metric values {entity_name: {metric: value}}
-            metric_definitions: Metric definitions
-            weights: Metric weights
-            
-        Returns:
-            Tuple of (new_ranking, changes)
-        """
+        """Rerank entities with updated metrics"""
         # Update entities with new metrics
         updated_entities = []
         for entity in current_ranking:
