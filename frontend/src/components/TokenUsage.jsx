@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import './TokenUsage.css';
+// Styles live in App.css — no separate import needed
 
 const TokenUsage = () => {
   const [usage, setUsage] = useState(null);
@@ -10,29 +10,21 @@ const TokenUsage = () => {
 
   useEffect(() => {
     fetchUsage();
-    // Auto-refresh every 30 seconds
     const interval = setInterval(fetchUsage, 30000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period]);
 
   const fetchUsage = async () => {
     try {
       setLoading(true);
       const response = await fetch(`http://localhost:8000/api/tokens/usage?period=${period}`);
-      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(errorData.detail || errorData.error || `HTTP ${response.status}`);
       }
-      
       const data = await response.json();
-      console.log('Token usage data:', data);
-      
-      // Check if we got valid data
-      if (!data.tokens || !data.cost || !data.budget) {
-        throw new Error('Invalid data format received');
-      }
-      
+      if (!data.tokens || !data.cost || !data.budget) throw new Error('Invalid data format received');
       setUsage(data);
       setError(null);
     } catch (err) {
@@ -52,9 +44,9 @@ const TokenUsage = () => {
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'critical': return '#dc3545';
+      case 'critical': return '#ff4d4d';
       case 'warning': return '#ffc107';
-      default: return '#28a745';
+      default: return '#4dff91';
     }
   };
 
@@ -69,7 +61,7 @@ const TokenUsage = () => {
   if (loading && !usage) {
     return (
       <div className="token-usage-compact loading">
-        <span className="spinner">⏳</span> Loading token usage...
+        <span className="spinner">⏳</span>
       </div>
     );
   }
@@ -82,9 +74,7 @@ const TokenUsage = () => {
           <div className="error-message">
             <strong>Token Tracker Error</strong>
             <p>{error}</p>
-            <button className="btn-retry" onClick={fetchUsage}>
-              🔄 Retry
-            </button>
+            <button className="btn-retry" onClick={fetchUsage}>Retry</button>
           </div>
         </div>
       </div>
@@ -94,8 +84,6 @@ const TokenUsage = () => {
   if (!usage) return null;
 
   const { tokens, cost, budget, queries, connected } = usage;
-
-  // Show warning if not connected to MongoDB
   const notConnected = connected === false;
 
   return (
@@ -109,70 +97,45 @@ const TokenUsage = () => {
               <span className="token-label">tokens</span>
               <span className="token-cost">${(cost?.total || 0).toFixed(2)}</span>
             </div>
-            <div className="token-budget">
-              <span className={`budget-status ${budget?.status || 'normal'}`}>
-                {getStatusIcon(budget?.status || 'normal')}
-                ${(budget?.remaining || budget?.monthly_limit || 0).toFixed(2)} / ${(budget?.monthly_limit || 0).toFixed(2)} left
-              </span>
-            </div>
           </div>
         </div>
-        <button className="toggle-details">
-          {showDetails ? '▼' : '▶'}
-        </button>
+        <button className="toggle-details">{showDetails ? '▾' : '▸'}</button>
       </div>
 
       {showDetails && (
         <div className="token-details">
-          {/* Connection Warning */}
           {notConnected && (
             <div className="connection-warning">
-              ⚠️ Token tracking is not connected to database. Data shown may be incomplete.
+              ⚠️ Token tracking not connected to database.
             </div>
           )}
 
-          {/* Period Selector */}
           <div className="period-selector">
-            <button
-              className={period === 'today' ? 'active' : ''}
-              onClick={() => setPeriod('today')}
-            >
-              Today
-            </button>
-            <button
-              className={period === 'week' ? 'active' : ''}
-              onClick={() => setPeriod('week')}
-            >
-              Week
-            </button>
-            <button
-              className={period === 'month' ? 'active' : ''}
-              onClick={() => setPeriod('month')}
-            >
-              Month
-            </button>
+            {['today', 'week', 'month'].map((p) => (
+              <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
+                {p.charAt(0).toUpperCase() + p.slice(1)}
+              </button>
+            ))}
           </div>
 
-          {/* Token Breakdown */}
           <div className="usage-stats">
             <div className="stat-item">
-              <div className="stat-label">Input Tokens</div>
-              <div className="stat-value">{formatNumber(tokens?.input || 0)}</div>
+              <span className="stat-label">Input</span>
+              <span className="stat-value">{formatNumber(tokens?.input || 0)}</span>
             </div>
             <div className="stat-item">
-              <div className="stat-label">Output Tokens</div>
-              <div className="stat-value">{formatNumber(tokens?.output || 0)}</div>
+              <span className="stat-label">Output</span>
+              <span className="stat-value">{formatNumber(tokens?.output || 0)}</span>
             </div>
             <div className="stat-item">
-              <div className="stat-label">Queries</div>
-              <div className="stat-value">{queries || 0}</div>
+              <span className="stat-label">Queries</span>
+              <span className="stat-value">{queries || 0}</span>
             </div>
           </div>
 
-          {/* Budget Progress Bar */}
           <div className="budget-progress">
             <div className="progress-label">
-              <span>Budget Usage</span>
+              <span>Budget</span>
               <span>{(budget?.percentage || 0).toFixed(1)}%</span>
             </div>
             <div className="progress-bar">
@@ -186,25 +149,23 @@ const TokenUsage = () => {
             </div>
             <div className="progress-stats">
               <span>Used: ${(budget?.used || 0).toFixed(2)}</span>
-              <span>Remaining: ${(budget?.remaining || budget?.monthly_limit || 0).toFixed(2)}</span>
+              <span>Left: ${(budget?.remaining || budget?.monthly_limit || 0).toFixed(2)}</span>
             </div>
           </div>
 
-          {/* Warnings */}
           {budget?.status === 'warning' && (
             <div className="budget-alert warning">
-              ⚠️ Warning: You've used {(budget.percentage || 0).toFixed(0)}% of your monthly budget
+              ⚠️ {(budget.percentage || 0).toFixed(0)}% of monthly budget used
             </div>
           )}
           {budget?.status === 'critical' && (
             <div className="budget-alert critical">
-              🚨 Critical: You've used {(budget.percentage || 0).toFixed(0)}% of your monthly budget!
+              🚨 {(budget.percentage || 0).toFixed(0)}% of monthly budget used!
             </div>
           )}
 
-          {/* Refresh Button */}
           <button className="btn-refresh" onClick={fetchUsage} disabled={loading}>
-            {loading ? '⏳' : '🔄'} Refresh
+            {loading ? '⏳' : '↻'} Refresh
           </button>
         </div>
       )}

@@ -279,7 +279,9 @@ Metrics: {json.dumps(metric_names)}
 Context: {context}
 
 For each entity, provide numeric values for all metrics.
-If you don't know exact values, provide reasonable estimates.
+Only provide values if they are explicitly known from reliable sources.
+If unknown, return null.
+Do NOT estimate or fabricate.
 
 Return ONLY a JSON array like:
 [

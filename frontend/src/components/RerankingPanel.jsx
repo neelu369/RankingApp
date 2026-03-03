@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import './RerankingPanel.css';
 
 const ReRankingPanel = ({ rankingResult, onReRankComplete }) => {
   const [metrics, setMetrics] = useState([]);
