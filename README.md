@@ -24,7 +24,7 @@ A comprehensive, dynamic ranking application that can rank **anything** by **any
 ✅ **Universal Ranking** - Rank any entity type (companies, products, people, teams, etc.)  
 ✅ **Dynamic Metrics** - Use any combination of numerical or categorical metrics  
 ✅ **Smart Normalization** - Multiple normalization strategies (MinMax, Standard, Robust)  
-✅ **AI-Powered Insights** - Get detailed analysis for any ranked entity  
+✅ **AI-Powered Insights** - Get detailed analysis for any ranked entity    
 ✅ **Live Data Integration** - Connect to real-time data sources and APIs  
 ✅ **Reranking** - Update metrics and see rankings change in real-time  
 ✅ **Comparison Engine** - Compare entities side-by-side  
