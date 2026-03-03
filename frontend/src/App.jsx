@@ -4,6 +4,7 @@ import CrawlerRanking from './components/CrawlerRanking';
 import DatasetRanking from './components/DatasetRanking';
 import RankingDisplay from './components/RankingDisplay';
 import InsightsPanel from './components/InsightsPanel';
+import ReRankingPanel from './components/RerankingPanel';
 import TokenUsage from './components/TokenUsage';
 
 
@@ -11,6 +12,31 @@ function App() {
   const [mode, setMode] = useState('crawler'); // 'crawler' or 'dataset'
   const [rankingResult, setRankingResult] = useState(null);
   const [selectedEntity, setSelectedEntity] = useState(null);
+  const [showReRankPanel, setShowReRankPanel] = useState(false);
+
+  const handleRankingComplete = (result) => {
+    setRankingResult(result);
+    setShowReRankPanel(false); // Hide re-rank panel for new ranking
+    setSelectedEntity(null);
+  };
+
+  const handleReRankComplete = (result) => {
+    // Update with new ranking
+    setRankingResult({
+      ...rankingResult,
+      ranking: result.ranking,
+      ranking_id: result.new_ranking_id,
+      optimization: result.optimization_report
+    });
+    setShowReRankPanel(false); // Close panel after re-ranking
+    
+    // Show notification
+    if (result.changes && result.changes.length > 0) {
+      alert(`✅ Re-ranking complete! ${result.changes.length} positions changed.`);
+    } else {
+      alert(`✅ Re-ranking complete! Rankings remain similar.`);
+    }
+  };
 
   return (
     <div className="App">
@@ -36,19 +62,39 @@ function App() {
 
       <div className="main-content">
         {mode === 'crawler' ? (
-          <CrawlerRanking onRankingComplete={setRankingResult} />
+          <CrawlerRanking onRankingComplete={handleRankingComplete} />
         ) : (
-          <DatasetRanking onRankingComplete={setRankingResult} />
+          <DatasetRanking onRankingComplete={handleRankingComplete} />
         )}
 
         {rankingResult && (
           <div className="results-section">
+            {/* Re-ranking Control Button */}
+            <div className="rerank-control">
+              <button
+                className="btn-toggle-rerank"
+                onClick={() => setShowReRankPanel(!showReRankPanel)}
+              >
+                {showReRankPanel ? '🔼 Hide Re-Ranking Controls' : '🔄 Not Happy? Re-Rank!'}
+              </button>
+            </div>
+
+            {/* Re-Ranking Panel */}
+            {showReRankPanel && (
+              <ReRankingPanel
+                rankingResult={rankingResult}
+                onReRankComplete={handleReRankComplete}
+              />
+            )}
+
+            {/* Ranking Display */}
             <RankingDisplay
               ranking={rankingResult.ranking}
               metrics={rankingResult.metrics_used}
               onEntitySelect={setSelectedEntity}
             />
 
+            {/* Insights Panel */}
             {selectedEntity && (
               <InsightsPanel
                 entity={selectedEntity}
@@ -60,8 +106,10 @@ function App() {
       </div>
 
       <footer className="App-footer">
-        <p>Powered by Replicate, LangChain, LangGraph, Crawl4AI & MongoDB</p>
-        <TokenUsage />
+        <div className="footer-content">
+          <p>Powered by Replicate, LangChain, LangGraph, Crawl4AI & MongoDB</p>
+          <TokenUsage />
+        </div>
       </footer>
     </div>
   );

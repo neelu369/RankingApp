@@ -92,7 +92,7 @@ const InsightsPanel = ({ entity, rankingId }) => {
   if (loading) {
     return (
       <div className="insights-panel loading">
-        <div className="spinner">⏳ Generating insights...</div>
+        <div>⏳ Generating insights...</div>
       </div>
     );
   }
@@ -106,7 +106,7 @@ const InsightsPanel = ({ entity, rankingId }) => {
         <button onClick={fetchInsights} className="btn-retry">
           🔄 Retry
         </button>
-      </div>
+      </div> 
     );
   }
 

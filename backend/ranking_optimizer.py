@@ -65,7 +65,7 @@ class RankingMetricsAnalyzer:
         metric_name: str, 
         current_value: float,
         historical_values: List[float] = None
-    ) -> MetricAnalysis:
+    ) -> MetricAnalysis:    
         """Analyze a single metric with historical context"""
         thresholds = self.thresholds.get(metric_name, {
             "excellent": 0.9, "good": 0.75, "acceptable": 0.6

@@ -1,320 +1,334 @@
 """
-Token and Cost Tracking System for Replicate API
-Monitors usage and alerts when approaching budget limits
+Token Usage Tracking System
+Stores token usage in MongoDB and tracks budget
 """
-import json
-import os
-from datetime import datetime
 from typing import Dict, Any, Optional
-import threading
+from datetime import datetime, timedelta
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
 
 
 class TokenTracker:
-    """Track token usage and costs for Replicate API"""
+    """Track and store LLM token usage"""
     
-    # Replicate pricing (approximate - check official pricing)
-    PRICING = {
-        "meta/llama-2-70b-chat": {
-            "input": 0.00065 / 1000,   # $0.00065 per 1K tokens
-            "output": 0.00275 / 1000    # $0.00275 per 1K tokens
-        },
-        "meta/llama-2-13b-chat": {
-            "input": 0.0001 / 1000,
-            "output": 0.0005 / 1000
-        },
-        "meta/llama-2-7b-chat": {
-            "input": 0.00005 / 1000,
-            "output": 0.00025 / 1000
-        }
-    }
-    
-    def __init__(self, budget_usd: float = 2.0, tracking_file: str = "token_usage.json"):
-        """
-        Initialize token tracker
+    def __init__(self):
+        self.collection = None  # Will be set when DB connects
         
-        Args:
-            budget_usd: Total budget in USD
-            tracking_file: File to persist tracking data
-        """
-        self.budget_usd = budget_usd
-        self.tracking_file = tracking_file
-        self.lock = threading.Lock()
-        
-        # Load existing data or initialize
-        self.data = self._load_data()
-        
-        # Initialize if needed
-        if not self.data:
-            self.data = {
-                "budget_usd": budget_usd,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_cost_usd": 0.0,
-                "requests": [],
-                "models_used": {},
-                "started_at": datetime.now().isoformat(),
-                "last_updated": datetime.now().isoformat()
+        # Pricing per 1M tokens (adjust based on your provider)
+        self.pricing = {
+            "replicate": {
+                "meta-llama-3-70b": {
+                    "input": 0.65,   # $0.65 per 1M input tokens
+                    "output": 2.75   # $2.75 per 1M output tokens
+                },
+                "meta-llama-3.1-405b": {
+                    "input": 5.00,
+                    "output": 15.00
+                }
+            },
+            "openai": {
+                "gpt-4": {
+                    "input": 30.00,
+                    "output": 60.00
+                },
+                "gpt-3.5-turbo": {
+                    "input": 0.50,
+                    "output": 1.50
+                }
             }
-            self._save_data()
+        }
+        
+        # Budget settings (in dollars)
+        self.monthly_budget = float(os.getenv("MONTHLY_BUDGET", "3.0"))
+        self.warning_threshold = 0.8  # Warn at 80% usage
+        self.critical_threshold = 0.95  # Critical at 95% usage
     
-    def _load_data(self) -> Dict[str, Any]:
-        """Load tracking data from file"""
-        if os.path.exists(self.tracking_file):
-            try:
-                with open(self.tracking_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"⚠️  Error loading tracking data: {e}")
-                return {}
-        return {}
+    async def connect(self, db):
+        """Connect to MongoDB collection"""
+        self.collection = db.token_usage
+        # Create indexes
+        await self.collection.create_index([("timestamp", -1)])
+        await self.collection.create_index([("query_id", 1)])
+        await self.collection.create_index([("date", 1)])
     
-    def _save_data(self):
-        """Save tracking data to file"""
-        try:
-            with open(self.tracking_file, 'w') as f:
-                json.dump(self.data, f, indent=2)
-        except Exception as e:
-            print(f"⚠️  Error saving tracking data: {e}")
-    
-    def track_request(
-        self, 
-        model: str, 
-        input_tokens: int, 
+    async def track_usage(
+        self,
+        query_id: str,
+        provider: str,
+        model: str,
+        input_tokens: int,
         output_tokens: int,
-        request_type: str = "general"
-    ):
+        operation: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
-        Track a single API request
+        Track token usage for a single operation
         
         Args:
-            model: Model identifier
+            query_id: ID of the query/ranking
+            provider: "replicate", "openai", etc.
+            model: Model name
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
-            request_type: Type of request (intent, metrics, entities, etc.)
+            operation: Type of operation (e.g., "intent_extraction", "metric_suggestion")
+            metadata: Additional info
+            
+        Returns:
+            Usage record with cost
         """
-        with self.lock:
-            # Get pricing for model
-            pricing = self.PRICING.get(model, self.PRICING["meta/llama-2-70b-chat"])
-            
-            # Calculate cost
-            input_cost = input_tokens * pricing["input"]
-            output_cost = output_tokens * pricing["output"]
-            total_cost = input_cost + output_cost
-            
-            # Update totals
-            self.data["total_input_tokens"] += input_tokens
-            self.data["total_output_tokens"] += output_tokens
-            self.data["total_cost_usd"] += total_cost
-            self.data["last_updated"] = datetime.now().isoformat()
-            
-            # Track by model
-            if model not in self.data["models_used"]:
-                self.data["models_used"][model] = {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cost_usd": 0.0,
-                    "requests": 0
-                }
-            
-            self.data["models_used"][model]["input_tokens"] += input_tokens
-            self.data["models_used"][model]["output_tokens"] += output_tokens
-            self.data["models_used"][model]["cost_usd"] += total_cost
-            self.data["models_used"][model]["requests"] += 1
-            
-            # Log request
-            request_log = {
-                "timestamp": datetime.now().isoformat(),
-                "model": model,
-                "type": request_type,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cost_usd": total_cost
-            }
-            self.data["requests"].append(request_log)
-            
-            # Save to disk
-            self._save_data()
-            
-            # Check budget and alert
-            self._check_budget_alert()
-    
-    def _check_budget_alert(self):
-        """Check if approaching budget limits and alert"""
-        remaining = self.get_remaining_budget()
-        percent_used = (self.data["total_cost_usd"] / self.budget_usd) * 100
+        # Calculate cost
+        cost = self._calculate_cost(provider, model, input_tokens, output_tokens)
         
-        if percent_used >= 90:
-            print(f"\n{'='*60}")
-            print(f"🚨 CRITICAL: Budget 90% Used!")
-            print(f"Used: ${self.data['total_cost_usd']:.4f} / ${self.budget_usd:.2f}")
-            print(f"Remaining: ${remaining:.4f}")
-            print(f"{'='*60}\n")
-        elif percent_used >= 75:
-            print(f"\n{'='*60}")
-            print(f"⚠️  WARNING: Budget 75% Used")
-            print(f"Used: ${self.data['total_cost_usd']:.4f} / ${self.budget_usd:.2f}")
-            print(f"Remaining: ${remaining:.4f}")
-            print(f"{'='*60}\n")
-        elif percent_used >= 50:
-            print(f"💰 Budget 50% used - ${remaining:.4f} remaining")
+        # Create record
+        record = {
+            "query_id": query_id,
+            "provider": provider,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cost_usd": cost,
+            "operation": operation,
+            "metadata": metadata or {},
+            "timestamp": datetime.utcnow(),
+            "date": datetime.utcnow().strftime("%Y-%m-%d")
+        }
+        
+        # Store in database
+        if self.collection is not None:
+            await self.collection.insert_one(record)
+        
+        return record
     
-    def get_summary(self) -> Dict[str, Any]:
-        """Get usage summary"""
-        remaining = self.get_remaining_budget()
-        percent_used = (self.data["total_cost_usd"] / self.budget_usd) * 100
+    def _calculate_cost(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> float:
+        """Calculate cost in USD"""
+        try:
+            pricing = self.pricing.get(provider, {}).get(model, {})
+            if not pricing:
+                # Unknown model, estimate
+                return (input_tokens + output_tokens) / 1_000_000 * 1.0
+            
+            input_cost = (input_tokens / 1_000_000) * pricing["input"]
+            output_cost = (output_tokens / 1_000_000) * pricing["output"]
+            
+            return round(input_cost + output_cost, 6)
+        except Exception as e:
+            print(f"Error calculating cost: {e}")
+            return 0.0
+    
+    async def get_usage_summary(
+        self,
+        period: str = "today"  # "today", "week", "month", "all"
+    ) -> Dict[str, Any]:
+        """
+        Get usage summary for a time period
+        
+        Returns:
+            Summary with tokens, cost, budget info
+        """
+        # Determine date range
+        now = datetime.utcnow()
+        
+        if period == "today":
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "week":
+            start_date = now - timedelta(days=7)
+        elif period == "month":
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:  # "all"
+            start_date = datetime(2020, 1, 1)
+        
+        # Query database
+        if self.collection is None:
+            return self._get_empty_summary()
+        
+        pipeline = [
+            {
+                "$match": {
+                    "timestamp": {"$gte": start_date}
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "total_input_tokens": {"$sum": "$input_tokens"},
+                    "total_output_tokens": {"$sum": "$output_tokens"},
+                    "total_tokens": {"$sum": "$total_tokens"},
+                    "total_cost": {"$sum": "$cost_usd"},
+                    "query_count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        result = await self.collection.aggregate(pipeline).to_list(length=1)
+        
+        if not result:
+            return self._get_empty_summary()
+        
+        data = result[0]
+        
+        # Calculate budget info
+        budget_used = data["total_cost"]
+        budget_remaining = max(0, self.monthly_budget - budget_used)
+        budget_percentage = (budget_used / self.monthly_budget * 100) if self.monthly_budget > 0 else 0
+        
+        # Determine status
+        if budget_percentage >= self.critical_threshold * 100:
+            status = "critical"
+        elif budget_percentage >= self.warning_threshold * 100:
+            status = "warning"
+        else:
+            status = "normal"
         
         return {
-            "budget_usd": self.budget_usd,
-            "spent_usd": self.data["total_cost_usd"],
-            "remaining_usd": remaining,
-            "percent_used": percent_used,
-            "total_input_tokens": self.data["total_input_tokens"],
-            "total_output_tokens": self.data["total_output_tokens"],
-            "total_tokens": self.data["total_input_tokens"] + self.data["total_output_tokens"],
-            "total_requests": len(self.data["requests"]),
-            "models_used": self.data["models_used"],
-            "started_at": self.data.get("started_at"),
-            "last_updated": self.data["last_updated"]
+            "period": period,
+            "tokens": {
+                "input": data["total_input_tokens"],
+                "output": data["total_output_tokens"],
+                "total": data["total_tokens"]
+            },
+            "cost": {
+                "total": round(data["total_cost"], 2),
+                "currency": "USD"
+            },
+            "budget": {
+                "monthly_limit": self.monthly_budget,
+                "used": round(budget_used, 2),
+                "remaining": round(budget_remaining, 2),
+                "percentage": round(budget_percentage, 1),
+                "status": status
+            },
+            "queries": data["query_count"],
+            "start_date": start_date.isoformat(),
+            "end_date": now.isoformat()
         }
     
-    def get_remaining_budget(self) -> float:
-        """Get remaining budget in USD"""
-        return max(0, self.budget_usd - self.data["total_cost_usd"])
-    
-    def can_make_request(self, estimated_tokens: int = 2000, model: str = None) -> bool:
-        """Check if there's budget for another request"""
-        if model is None:
-            model = list(self.PRICING.keys())[0]
-        
-        pricing = self.PRICING.get(model, self.PRICING["meta/llama-2-70b-chat"])
-        
-        # Estimate cost (assume 50/50 input/output)
-        estimated_cost = (estimated_tokens / 2) * pricing["input"] + (estimated_tokens / 2) * pricing["output"]
-        
-        remaining = self.get_remaining_budget()
-        return remaining >= estimated_cost
-    
-    def print_status(self):
-        """Print current status"""
-        summary = self.get_summary()
-        
-        print(f"\n{'='*60}")
-        print(f"💰 TOKEN USAGE & BUDGET STATUS")
-        print(f"{'='*60}")
-        print(f"\n📊 Budget:")
-        print(f"   Total Budget: ${summary['budget_usd']:.2f}")
-        print(f"   Spent:        ${summary['spent_usd']:.4f} ({summary['percent_used']:.1f}%)")
-        print(f"   Remaining:    ${summary['remaining_usd']:.4f}")
-        
-        # Progress bar
-        bar_length = 40
-        filled = int(bar_length * summary['percent_used'] / 100)
-        bar = '█' * filled + '░' * (bar_length - filled)
-        print(f"   [{bar}] {summary['percent_used']:.1f}%")
-        
-        print(f"\n🔢 Tokens:")
-        print(f"   Input:  {summary['total_input_tokens']:,}")
-        print(f"   Output: {summary['total_output_tokens']:,}")
-        print(f"   Total:  {summary['total_tokens']:,}")
-        
-        print(f"\n📡 Requests:")
-        print(f"   Total: {summary['total_requests']}")
-        
-        if summary['models_used']:
-            print(f"\n🤖 Models Used:")
-            for model, stats in summary['models_used'].items():
-                model_name = model.split('/')[-1]
-                print(f"   {model_name}:")
-                print(f"      Requests: {stats['requests']}")
-                print(f"      Tokens: {stats['input_tokens'] + stats['output_tokens']:,}")
-                print(f"      Cost: ${stats['cost_usd']:.4f}")
-        
-        print(f"\n⏰ Timeline:")
-        print(f"   Started: {summary['started_at']}")
-        print(f"   Updated: {summary['last_updated']}")
-        
-        print(f"\n{'='*60}\n")
-    
-    def reset(self):
-        """Reset tracking data"""
-        self.data = {
-            "budget_usd": self.budget_usd,
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost_usd": 0.0,
-            "requests": [],
-            "models_used": {},
-            "started_at": datetime.now().isoformat(),
-            "last_updated": datetime.now().isoformat()
+    def _get_empty_summary(self) -> Dict[str, Any]:
+        """Return empty summary when no data"""
+        return {
+            "period": "today",
+            "tokens": {"input": 0, "output": 0, "total": 0},
+            "cost": {"total": 0.0, "currency": "USD"},
+            "budget": {
+                "monthly_limit": self.monthly_budget,
+                "used": 0.0,
+                "remaining": self.monthly_budget,
+                "percentage": 0.0,
+                "status": "normal"
+            },
+            "queries": 0,
+            "start_date": datetime.utcnow().isoformat(),
+            "end_date": datetime.utcnow().isoformat()
         }
-        self._save_data()
-        print("✅ Token tracking data reset")
+    
+    async def get_usage_by_operation(
+        self,
+        period: str = "month"
+    ) -> Dict[str, Any]:
+        """Get token usage breakdown by operation type"""
+        now = datetime.utcnow()
+        
+        if period == "today":
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "week":
+            start_date = now - timedelta(days=7)
+        else:  # "month"
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        if self.collection is None:
+            return {}
+        
+        pipeline = [
+            {
+                "$match": {
+                    "timestamp": {"$gte": start_date}
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$operation",
+                    "total_tokens": {"$sum": "$total_tokens"},
+                    "total_cost": {"$sum": "$cost_usd"},
+                    "count": {"$sum": 1}
+                }
+            },
+            {
+                "$sort": {"total_cost": -1}
+            }
+        ]
+        
+        results = await self.collection.aggregate(pipeline).to_list(length=100)
+        
+        breakdown = {}
+        for item in results:
+            breakdown[item["_id"]] = {
+                "tokens": item["total_tokens"],
+                "cost": round(item["total_cost"], 4),
+                "calls": item["count"]
+            }
+        
+        return breakdown
+    
+    async def get_daily_usage(self, days: int = 30) -> list:
+        """Get daily usage for the last N days"""
+        if self.collection is None:
+            return []
+        
+        now = datetime.utcnow()
+        start_date = now - timedelta(days=days)
+        
+        pipeline = [
+            {
+                "$match": {
+                    "timestamp": {"$gte": start_date}
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$date",
+                    "total_tokens": {"$sum": "$total_tokens"},
+                    "total_cost": {"$sum": "$cost_usd"},
+                    "queries": {"$sum": 1}
+                }
+            },
+            {
+                "$sort": {"_id": 1}
+            }
+        ]
+        
+        results = await self.collection.aggregate(pipeline).to_list(length=days)
+        
+        return [
+            {
+                "date": item["_id"],
+                "tokens": item["total_tokens"],
+                "cost": round(item["total_cost"], 4),
+                "queries": item["queries"]
+            }
+            for item in results
+        ]
+    
+    async def check_budget_exceeded(self) -> Dict[str, Any]:
+        """Check if budget is exceeded or near limit"""
+        summary = await self.get_usage_summary("month")
+        budget = summary["budget"]
+        
+        return {
+            "exceeded": budget["percentage"] >= 100,
+            "near_limit": budget["percentage"] >= self.warning_threshold * 100,
+            "critical": budget["percentage"] >= self.critical_threshold * 100,
+            "percentage": budget["percentage"],
+            "used": budget["used"],
+            "remaining": budget["remaining"],
+            "status": budget["status"]
+        }
 
 
 # Global instance
-token_tracker = TokenTracker(budget_usd=2.0)
-
-
-# Decorator to automatically track LLM calls
-def track_tokens(request_type: str = "general"):
-    """Decorator to track token usage"""
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            result = func(*args, **kwargs)
-            
-            # Try to extract token info from result
-            # This is approximate - adjust based on actual API response
-            if isinstance(result, str):
-                # Estimate tokens (rough: ~4 chars per token)
-                estimated_output = len(result) // 4
-                estimated_input = len(str(args)) // 4 if args else 500
-                
-                # Get model from kwargs or use default
-                model = kwargs.get('model', 'meta/llama-2-70b-chat')
-                
-                token_tracker.track_request(
-                    model=model,
-                    input_tokens=estimated_input,
-                    output_tokens=estimated_output,
-                    request_type=request_type
-                )
-            
-            return result
-        return wrapper
-    return decorator
-
-
-if __name__ == "__main__":
-    # Test the tracker
-    print("Testing Token Tracker...")
-    
-    # Simulate some requests
-    token_tracker.track_request(
-        model="meta/llama-2-70b-chat",
-        input_tokens=500,
-        output_tokens=1000,
-        request_type="intent_extraction"
-    )
-    
-    token_tracker.track_request(
-        model="meta/llama-2-70b-chat",
-        input_tokens=300,
-        output_tokens=800,
-        request_type="metric_suggestion"
-    )
-    
-    token_tracker.track_request(
-        model="meta/llama-2-70b-chat",
-        input_tokens=1000,
-        output_tokens=2000,
-        request_type="entity_metrics"
-    )
-    
-    # Print status
-    token_tracker.print_status()
-    
-    # Check if can make more requests
-    if token_tracker.can_make_request(2000):
-        print("✅ Budget available for more requests")
-    else:
-        print("❌ Budget limit reached")
+token_tracker = TokenTracker()
