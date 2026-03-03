@@ -4,14 +4,6 @@ A comprehensive, dynamic ranking application that can rank **anything** by **any
 
 ## 🌟 Features
 
-### Two Powerful Modes
-
-#### 📊 Dataset Mode
-- Upload CSV files with your data
-- Auto-detect or manually specify metrics
-- Configure metric weights and normalization
-- Get instant rankings with detailed scores
-
 #### 🌐 Crawler Mode
 - Ask natural language ranking queries (e.g., "Top 10 incubators in India")
 - AI automatically understands your intent
@@ -125,27 +117,6 @@ Frontend will run at `http://localhost:3000`
 
 ## 🚀 Usage
 
-### Dataset Mode Example
-
-1. **Prepare your CSV file**
-   ```csv
-   name,funding,employees,revenue,rating
-   Startup A,5000000,50,2000000,4.5
-   Startup B,10000000,100,5000000,4.8
-   Startup C,2000000,25,1000000,4.2
-   ```
-
-2. **Upload and Configure**
-   - Click "Dataset Mode"
-   - Upload your CSV
-   - Choose "Auto-detect metrics" or specify manually
-   - Click "Rank Dataset"
-
-3. **View Results**
-   - See ranked table with all metrics
-   - Click "Insights" on any entity for detailed analysis
-   - Compare entities side-by-side
-
 ### Crawler Mode Example
 
 1. **Ask a Ranking Question**
@@ -180,15 +151,6 @@ Body: {
   "num_results": 10,
   "metrics": [...],  # Optional
   "sources": [...]   # Optional
-}
-
-# Dataset-based ranking
-POST /api/rank/dataset
-Form Data: file (CSV)
-Body: {
-  "metrics": [...],
-  "weights": {...},
-  "sources": [...]
 }
 
 # Get insights for an entity
@@ -272,7 +234,6 @@ ranking-app/
 │   │   ├── App.css
 │   │   └── components/
 │   │       ├── CrawlerRanking.jsx
-│   │       ├── DatasetRanking.jsx
 │   │       ├── RankingDisplay.jsx
 │   │       └── InsightsPanel.jsx
 │   └── package.json
